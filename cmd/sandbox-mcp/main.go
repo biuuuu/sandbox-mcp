@@ -12,80 +12,113 @@ import (
 )
 
 func main() {
-	// Parse flags
-	stdio := flag.Bool("stdio", false, "Start the MCP via stdio transport")
-	build := flag.Bool("build", false, "Build Docker images for all sandboxes")
-	pull := flag.Bool("pull", false, "Pull default sandboxes from GitHub")
-	force := flag.Bool("force", false, "Force overwrite existing sandboxes when pulling")
+	// 解析命令行参数
+	stdio := flag.Bool("stdio", false, "通过标准输入输出启动MCP")
+	sse := flag.Bool("sse", false, "通过SSE启动MCP")
+	build := flag.Bool("build", false, "为所有沙箱构建Docker镜像")
+	pull := flag.Bool( "pull", false, "从GitHub拉取默认沙箱")
+	force := flag.Bool("force", false, "拉取时强制覆盖现有沙箱")
 	flag.Parse()
 
-	// Configure logging
-	// TODO: Improve logging as per MCP spec
-	log.SetPrefix("[Sandbox MCP] ")
+	// 配置日志记录
+	// TODO: 根据MCP规范改进日志记录
+	log.SetPrefix("[沙箱 MCP] ")
 	log.SetFlags(log.Ldate | log.Ltime)
 
-	// Load application configuration
+	// 加载应用程序配置
 	cfg, err := appconfig.LoadConfig()
 	if err != nil {
-		log.Fatalf("Failed to load sandbox-mcp configuration: %v", err)
+		log.Fatalf("加载sandbox-mcp配置失败: %v", err)
 	}
 
-	// Pull sandboxes if pull flag is present
+	// 如果存在pull标志，则拉取沙箱
 	if *pull {
 		if err := sandbox.PullSandboxes(cfg.SandboxesPath, *force); err != nil {
-			log.Fatalf("Failed to pull sandboxes: %v", err)
+			log.Fatalf("拉取沙箱失败: %v", err)
 		}
 		return
 	}
 
-	// Load sandbox configurations from the configured path
+	// 从配置路径加载沙箱配置
 	configs, err := config.LoadSandboxConfigs(cfg.SandboxesPath)
 	if err != nil {
-		log.Fatalf("Failed to load sandbox configurations: %v", err)
+		log.Fatalf("加载沙箱配置失败: %v", err)
 	}
 
-	// Build Docker images if build flag is present
+	// 如果存在build标志，则构建Docker镜像
 	if *build {
-		log.Println("Building Docker images for all sandboxes...")
+		log.Println("正在为所有沙箱构建Docker镜像...")
 		for _, sandboxCfg := range configs {
 			if err := sandbox.BuildImage(context.Background(), sandboxCfg, cfg.SandboxesPath); err != nil {
-				log.Printf("Failed to build image for sandbox %s: %v", sandboxCfg.Id, err)
+				log.Printf("为沙箱 %s 构建镜像失败: %v", sandboxCfg.Id, err)
 				continue
 			}
 		}
 		return
 	}
 
-	// Only start MCP server if the stdio flag is present
-	if *stdio {
-		// Create a new MCP server
+	// 仅当存在sse标志时启动MCP服务器
+	if *sse {
+		// 创建新的MCP服务器
 		s := server.NewMCPServer(
 			"Sandbox MCP",
 			"0.1.0",
-			// We don't notify when the list of tools changes
-			// The list of tools never change for now
+			// 当工具列表更改时，我们不通知
+			// 目前工具列表不会更改
+			server.WithToolCapabilities(false),
+		)
+		sseServer := server.NewSSEServer(s)
+		// 为每个沙箱配置创建并添加工具
+		for _, cfg := range configs {
+			// 从配置创建新工具
+			tool := sandbox.NewSandboxTool(cfg)
+
+			// 使用沙箱配置创建处理程序
+			handler := sandbox.NewSandboxToolHandler(cfg)
+
+			// 将工具添加到服务器
+			s.AddTool(tool, handler)
+
+			log.Printf("从配置添加 %s 工具", cfg.Id)
+		}
+
+		log.Println("启动沙箱MCP服务器...")
+		log.Printf("沙箱MCP服务器已启动，地址: %s", "localhost:10061")
+		if err := sseServer.Start("0.0.0.0:10061"); err != nil {
+			log.Printf("启动服务器错误: %v", err)
+			return
+		}
+	}
+	// 仅当存在stdio标志时启动MCP服务器
+	if *stdio {
+		// 创建新的MCP服务器
+		s := server.NewMCPServer(
+			"Sandbox MCP",
+			"0.1.0",
+			// 当工具列表更改时，我们不通知
+			// 目前工具列表不会更改
 			server.WithToolCapabilities(false),
 		)
 
-		// Create and add tools for each sandbox configuration
+		// 为每个沙箱配置创建并添加工具
 		for _, cfg := range configs {
-			// Create a new tool from the config
+			// 从配置创建新工具
 			tool := sandbox.NewSandboxTool(cfg)
 
-			// Create a handler using the sandbox config
+			// 使用沙箱配置创建处理程序
 			handler := sandbox.NewSandboxToolHandler(cfg)
 
-			// Add the tool to the server
+			// 将工具添加到服务器
 			s.AddTool(tool, handler)
 
-			log.Printf("Added %s tool from config", cfg.Id)
+			log.Printf("从配置添加 %s 工具", cfg.Id)
 		}
 
-		log.Println("Starting Sandbox MCP server...")
+		log.Println("启动沙箱MCP服务器...")
 
-		// Start the server
+		// 启动服务器
 		if err := server.ServeStdio(s); err != nil {
-			log.Printf("Error starting server: %v\n", err)
+			log.Printf("启动服务器错误: %v\n", err)
 		}
 	}
 }
